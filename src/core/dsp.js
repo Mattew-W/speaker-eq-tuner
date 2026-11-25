@@ -38,7 +38,7 @@ function _degenerate(sr) {
   return { ir, delaySamples: 0, freqs, db, peakDb: 0 };
 }
 
-/** 归一化互相关求时延：R = IFFT(FFT(rec) * conj(FFT(chirp)))，取 |R| 峰值。 */
+/** 互相关求时延：R = IFFT(FFT(rec) * conj(FFT(chirp)))，取 |R| 峰值。 */
 function _estimateDelay(recorded, chirp, recLen, chirpLen) {
   const need = recLen + chirpLen - 1;
   let n = Math.min(nextPow2(need), MAX_FFT);

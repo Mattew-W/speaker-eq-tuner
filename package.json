@@ -8,6 +8,7 @@
     "dev": "vite --host 0.0.0.0",
     "manage": "node scripts/dev-manager.mjs",
     "build": "vite build",
+    "test": "node --test",
     "preview": "vite preview --host 0.0.0.0"
   },
   "devDependencies": {

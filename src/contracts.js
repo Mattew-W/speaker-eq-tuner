@@ -76,7 +76,7 @@ export const REF_BAND = Object.freeze({ lo: 300, hi: 3000 });
 /**
  * @typedef {Object} MeasurementResult
  * @property {Float64Array} freqs      GRID 频率轴
- * @property {Float64Array} rawDb      未平滑曲线 dB（已映射到 GRID、已做参考带能量归一化形状）
+ * @property {Float64Array} rawDb      未平滑曲线 dB（已映射到 GRID；粉噪已扣除参考信号功率谱，参考带对齐由 main.js 完成）
  * @property {Float64Array} smoothDb   按用户平滑档处理后的曲线 dB
  * @property {number}       sampleRate 实际采样率
  * @property {'pink'|'sweep'} mode
@@ -116,7 +116,7 @@ export const REF_BAND = Object.freeze({ lo: 300, hi: 3000 });
  * 【户部】src/core/targets.js
  *
  *   export const TARGETS: Array<{ id: string, name: string, description: string, points: Array<[number, number]> }>
- *       // 至少包含：flat / harman-speaker / harman-headphone / warm / vocal
+ *       // 包含：flat / small-speaker / harman-speaker / harman-headphone / warm / vocal
  *       // points 为 [频率Hz, 相对dB] 控制点，按频率升序
  *   export function getTargetMeta(id: string): { id, name, description, points }
  *   export function sampleTarget(id: string, freqs: Float64Array, opts?: { tiltDbPerOct?: number, bassDb?: number }): Float64Array
@@ -128,10 +128,10 @@ export const REF_BAND = Object.freeze({ lo: 300, hi: 3000 });
  *
  *   export function createBand(partial?: Partial<Band>): Band
  *   export function clampBand(band: Band): Band            // 按 EQ_LIMITS 钳制，返回新对象
- *   export function biquadMagnitudeDb(band: Band, freqs: Float64Array): Float64Array
+ *   export function biquadMagnitudeDb(band: Band, freqs: Float64Array, sampleRate?: number): Float64Array
  *       // RBJ cookbook 解析式求 |H(f)| dB；band.enabled === false 时返回全 0
- *   export function totalEqResponseDb(bands: Band[], freqs: Float64Array): Float64Array
- *   export function solveEqBands(deltaDb: Float64Array, freqs: Float64Array, opts?: { bandCount?: number, maxGain?: number }): Band[]
+ *   export function totalEqResponseDb(bands: Band[], freqs: Float64Array, sampleRate?: number): Float64Array
+ *   export function solveEqBands(deltaDb: Float64Array, freqs: Float64Array, opts?: { bandCount?: number, maxGain?: number, maxBoost?: number, sampleRate?: number }): Band[]
  *       // 贪心迭代：平滑 delta -> 反复找出最大偏差处放置 peaking 滤波器并减去其理论响应
  *       // 末尾做一次增益最小二乘微调；返回结果按 freq 升序，长度 <= EQ_LIMITS.maxBands
  *   export function eqErrorRms(deltaDb: Float64Array, eqDb: Float64Array, freqs: Float64Array): number

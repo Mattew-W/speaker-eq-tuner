@@ -7,6 +7,7 @@
  * 所有返回值均为新对象，数值结果保证为有限值（无 NaN / Infinity）。
  */
 import { EQ_LIMITS, SAMPLE_RATE, GRID } from '../contracts.js';
+import { smoothLogCurve } from './dsp.js';
 
 /* ----------------------------- 内部工具 ----------------------------- */
 
@@ -32,38 +33,6 @@ function smoothstep(t) {
   return x * x * (3 - 2 * x);
 }
 
-/**
- * 与 dsp.smoothLogCurve(divisor) 等价的本地 1/divisor 倍频程平滑：
- * 在 log2(f) 域做三角加权移动平均（divisor=6 即 1/6 倍频程）。
- * 自包含实现，避免并行开发阶段对尚未生成的模块产生运行时依赖。
- * @param {Float64Array} freqs
- * @param {Float64Array} db
- * @param {number} divisor
- * @returns {Float64Array}
- */
-function smoothLogLocal(freqs, db, divisor) {
-  const n = db.length;
-  const out = new Float64Array(n);
-  const half = 1 / Math.max(finiteOr(divisor, 6), 1e-6);
-  const lf = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    lf[i] = Math.log2(Math.max(finiteOr(freqs[i], 1), 1e-6));
-  }
-  for (let i = 0; i < n; i++) {
-    let sum = 0;
-    let wsum = 0;
-    for (let j = 0; j < n; j++) {
-      const d = Math.abs(lf[j] - lf[i]);
-      if (d >= half) continue;
-      const w = 1 - d / half;
-      sum += w * (Number.isFinite(db[j]) ? db[j] : 0);
-      wsum += w;
-    }
-    out[i] = wsum > 0 ? sum / wsum : (Number.isFinite(db[i]) ? db[i] : 0);
-  }
-  return out;
-}
-
 /** 频段边缘权重：30Hz 以下、18kHz 以上平滑渐降到 0，中间恒为 1（避免不可控频段的荒谬补偿）。 */
 function bandEdgeWeight(f) {
   if (f < EQ_LIMITS.fMin) {
@@ -74,6 +43,14 @@ function bandEdgeWeight(f) {
     const span = GRID.fMax - EQ_LIMITS.fMax;
     return span > 0 ? smoothstep((GRID.fMax - f) / span) : 1;
   }
+  return 1;
+}
+
+/** 低频输出能力与极高频麦克风响应未知时，自动增益逐渐减小。手动 EQ 不受此限制。 */
+function boostReliability(f) {
+  if (f <= 100 || f >= 16000) return 0;
+  if (f < 200) return smoothstep((f - 100) / 100);
+  if (f > 12000) return smoothstep((16000 - f) / 4000);
   return 1;
 }
 
@@ -143,23 +120,25 @@ export function clampBand(band) {
 }
 
 /**
- * 用 RBJ Audio EQ Cookbook 的双二阶系数，在数字域 z=e^{jω}（ω=2πf/fs，fs=SAMPLE_RATE）
+ * 用 RBJ Audio EQ Cookbook 的双二阶系数，在数字域 z=e^{jω}（ω=2πf/fs，fs 为实际采样率）
  * 求 |H(f)| 并转 dB。支持 peaking / lowshelf / highshelf 三类；
  * b0..b2 / a0..a2 统一先除以 a0 归一化，再以 cos/sin 展开复数比值（避免复数对象）。
  * band.enabled===false 或 gain≈0 时返回全 0 数组；结果全部为有限值；不修改入参。
  * @param {Band} band
  * @param {Float64Array} freqs 频率轴
+ * @param {number} [sampleRate] 实际 AudioContext 采样率
  * @returns {Float64Array} 每个频点的幅频响应（dB）
  */
-export function biquadMagnitudeDb(band, freqs) {
+export function biquadMagnitudeDb(band, freqs, sampleRate = SAMPLE_RATE) {
   const n = freqs.length;
   const out = new Float64Array(n);
   if (!band || band.enabled === false) return out;
   const g = finiteOr(band.gain, 0);
   if (Math.abs(g) < 1e-9) return out;
 
-  const f0 = clamp(finiteOr(band.freq, 1000), 1, SAMPLE_RATE * 0.49);
-  const w0 = 2 * Math.PI * f0 / SAMPLE_RATE;
+  const sr = Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : SAMPLE_RATE;
+  const f0 = clamp(finiteOr(band.freq, 1000), 1, sr * 0.495);
+  const w0 = 2 * Math.PI * f0 / sr;
   const c = Math.cos(w0);
   const s = Math.sin(w0);
   const A = Math.pow(10, g / 40);
@@ -168,8 +147,8 @@ export function biquadMagnitudeDb(band, freqs) {
 
   let b0, b1, b2, a0, a1, a2;
   if (type === 'lowshelf' || type === 'highshelf') {
-    // S=1 简化：alpha = sin(w0)/2 * sqrt((A + 1/A) + 2)
-    const alpha = s / 2 * Math.sqrt((A + 1 / A) + 2);
+    // RBJ shelf 斜率 S=1：alpha = sin(w0)/2 * sqrt(2)
+    const alpha = s / Math.SQRT2;
     const beta = 2 * sqrtA * alpha;
     if (type === 'lowshelf') {
       b0 = A * ((A + 1) - (A - 1) * c + beta);
@@ -208,7 +187,7 @@ export function biquadMagnitudeDb(band, freqs) {
 
   for (let i = 0; i < n; i++) {
     const f = finiteOr(freqs[i], 0);
-    const w = 2 * Math.PI * f / SAMPLE_RATE;
+    const w = 2 * Math.PI * f / sr;
     const cw = Math.cos(w);
     const sw = Math.sin(w);
     const c2w = Math.cos(2 * w);
@@ -231,13 +210,14 @@ export function biquadMagnitudeDb(band, freqs) {
  * 各频段 dB 响应逐点相加，得到 EQ 总响应；不修改入参，结果保证有限。
  * @param {Band[]} bands
  * @param {Float64Array} freqs
+ * @param {number} [sampleRate]
  * @returns {Float64Array} 总响应（dB）
  */
-export function totalEqResponseDb(bands, freqs) {
+export function totalEqResponseDb(bands, freqs, sampleRate = SAMPLE_RATE) {
   const out = new Float64Array(freqs.length);
   if (!Array.isArray(bands)) return out;
   for (let k = 0; k < bands.length; k++) {
-    const r = biquadMagnitudeDb(bands[k], freqs);
+    const r = biquadMagnitudeDb(bands[k], freqs, sampleRate);
     for (let i = 0; i < out.length; i++) out[i] += r[i];
   }
   for (let i = 0; i < out.length; i++) {
@@ -249,7 +229,7 @@ export function totalEqResponseDb(bands, freqs) {
 /**
  * 由「目标 - 实测」偏差曲线自动拟合参量 EQ。算法要点：
  *   1. 1/6 倍频程平滑，并把 30Hz 以下 / 18kHz 以上权重渐降到 0，得到有效目标 goal；
- *   2. 低(<120Hz)/高(>10kHz)端整体偏置超 2dB 时各放一个 shelf，减去其理论响应并占用名额；
+ *   2. 只对低 / 高频端的过量能量自动放置衰减 shelf；自动提升限制在可靠频带与 maxBoost 内；
  *   3. 剩余名额贪心放 peaking：找 |residual| 最大点 → 半高宽估 Q → gain 取 0.8 倍 → 减去响应；
  *      峰值 <0.4dB 提前停止，且与已用峰值点 idx 距离 <2 的候选跳过，避免重复堆叠；
  *   4. 4 轮增益最小二乘微调：s = Σ(e·r)/Σ(r²+1e-9)，gain += s*0.5，逐段后重算总响应；
@@ -257,7 +237,7 @@ export function totalEqResponseDb(bands, freqs) {
  * 不修改 deltaDb / freqs，返回全新的 Band[]。
  * @param {Float64Array} deltaDb 已做参考带对齐的「目标 - 实测」偏差（dB）
  * @param {Float64Array} freqs 频率轴
- * @param {{ bandCount?: number, maxGain?: number }} [opts] 默认 { bandCount: 7, maxGain: 9 }
+ * @param {{ bandCount?: number, maxGain?: number, maxBoost?: number, sampleRate?: number }} [opts] 默认 { bandCount: 7, maxGain: 9, maxBoost: 4, sampleRate: 48000 }
  * @returns {Band[]} 拟合得到的 EQ 频段列表
  */
 export function solveEqBands(deltaDb, freqs, opts = {}) {
@@ -274,13 +254,17 @@ export function solveEqBands(deltaDb, freqs, opts = {}) {
   const o = (opts && typeof opts === 'object') ? opts : {};
   const bandCount = clamp(Math.round(finiteOr(o.bandCount, 7)), 0, EQ_LIMITS.maxBands);
   const maxGain = clamp(finiteOr(o.maxGain, 9), 0, EQ_LIMITS.gainMax);
+  const maxBoost = clamp(finiteOr(o.maxBoost, 4), 0, maxGain);
+  const sampleRate = Number.isFinite(o.sampleRate) && o.sampleRate > 0 ? o.sampleRate : SAMPLE_RATE;
   if (n === 0 || bandCount === 0) return [];
 
   // 1) 平滑 + 边缘权重 → 有效目标 goal；residual 为其工作副本
-  const smoothed = smoothLogLocal(f, delta, 6);
+  const smoothed = smoothLogCurve(f, delta, 6);
   const goal = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    goal[i] = smoothed[i] * bandEdgeWeight(f[i]);
+    goal[i] = f[i] < sampleRate * 0.49
+      ? smoothed[i] * bandEdgeWeight(f[i]) * (smoothed[i] > 0 ? boostReliability(f[i]) : 1)
+      : 0;
   }
   const residual = new Float64Array(goal);
   const bands = [];
@@ -289,29 +273,29 @@ export function solveEqBands(deltaDb, freqs, opts = {}) {
   // 2) 低 / 高频端整体偏置 → shelf
   const lowAvg = avgInRange(residual, f, -Infinity, 120);
   const highAvg = avgInRange(residual, f, 10000, Infinity);
-  if (Math.abs(lowAvg) > 2 && slots > 0) {
+  if (lowAvg < -2 && slots > 0) {
     const band = clampBand({
       type: 'lowshelf',
       freq: 80,
-      gain: clamp(lowAvg * 0.7, -maxGain, maxGain),
+      gain: clamp(lowAvg * 0.7, -maxGain, 0),
       q: 0.7,
       enabled: true,
     });
     bands.push(band);
     slots--;
-    subtract(residual, biquadMagnitudeDb(band, f));
+    subtract(residual, biquadMagnitudeDb(band, f, sampleRate));
   }
-  if (Math.abs(highAvg) > 2 && slots > 0) {
+  if (highAvg < -2 && slots > 0) {
     const band = clampBand({
       type: 'highshelf',
       freq: 10000,
-      gain: clamp(highAvg * 0.7, -maxGain, maxGain),
+      gain: clamp(highAvg * 0.7, -maxGain, 0),
       q: 0.7,
       enabled: true,
     });
     bands.push(band);
     slots--;
-    subtract(residual, biquadMagnitudeDb(band, f));
+    subtract(residual, biquadMagnitudeDb(band, f, sampleRate));
   }
 
   // 3) 贪心放置 peaking
@@ -320,6 +304,8 @@ export function solveEqBands(deltaDb, freqs, opts = {}) {
     let bestIdx = -1;
     let bestAbs = 0;
     for (let i = 0; i < n; i++) {
+      if (f[i] >= sampleRate * 0.49) continue;
+      if (residual[i] > 0 && maxBoost * boostReliability(f[i]) < 0.25) continue;
       const a = Math.abs(residual[i]);
       if (a > bestAbs && !isNearUsed(i, usedIdx, 2)) {
         bestAbs = a;
@@ -339,24 +325,25 @@ export function solveEqBands(deltaDb, freqs, opts = {}) {
 
     const fc = f[bestIdx];
     const bw = Math.max(f[hi] - f[lo], 1e-6);
-    const q = clamp(fc / bw, 0.6, 5);
+    const q = clamp(fc / bw, 0.6, peakVal > 0 ? 2 : 5);
+    const localBoost = maxBoost * boostReliability(fc);
     const band = clampBand({
       type: 'peaking',
       freq: fc,
-      gain: clamp(peakVal * 0.8, -maxGain, maxGain),
+      gain: clamp(peakVal * 0.8, -maxGain, localBoost),
       q,
       enabled: true,
     });
     bands.push(band);
-    subtract(residual, biquadMagnitudeDb(band, f));
+    subtract(residual, biquadMagnitudeDb(band, f, sampleRate));
   }
 
   // 4) 4 轮增益最小二乘微调
   for (let round = 0; round < 4; round++) {
-    let totalEq = totalEqResponseDb(bands, f);
+    let totalEq = totalEqResponseDb(bands, f, sampleRate);
     for (let k = 0; k < bands.length; k++) {
       const band = bands[k];
-      const r = biquadMagnitudeDb(band, f);
+      const r = biquadMagnitudeDb(band, f, sampleRate);
       let num = 0;
       let den = 0;
       for (let i = 0; i < n; i++) {
@@ -366,10 +353,13 @@ export function solveEqBands(deltaDb, freqs, opts = {}) {
       }
       const sRaw = den > 0 ? num / den : 0;
       const s = Number.isFinite(sRaw) ? clamp(sRaw, -2, 2) : 0;
+      const upper = band.type === 'peaking' ? maxBoost * boostReliability(band.freq) : 0;
+      const nextGain = clamp(band.gain + s * 0.5, -maxGain, upper);
       bands[k] = clampBand(Object.assign({}, band, {
-        gain: clamp(band.gain + s * 0.5, -EQ_LIMITS.gainMax, EQ_LIMITS.gainMax),
+        gain: nextGain,
+        q: nextGain > 0 && band.type === 'peaking' ? Math.min(band.q, 2) : band.q,
       }));
-      totalEq = totalEqResponseDb(bands, f);
+      totalEq = totalEqResponseDb(bands, f, sampleRate);
     }
   }
 

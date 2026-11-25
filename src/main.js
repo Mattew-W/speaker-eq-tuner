@@ -14,7 +14,7 @@
  * 本文件不实现任何 DSP，只负责数据流转与交互。
  * ============================================================================
  */
-import { EQ_LIMITS, DOM_IDS } from './contracts.js';
+import { EQ_LIMITS, SAMPLE_RATE, DOM_IDS } from './contracts.js';
 import {
   createLogGrid, alignLevel, smoothLogCurve, mapToGrid,
   generatePinkNoise, generateLogChirp, clamp,
@@ -211,9 +211,15 @@ async function ensureEngine(needMic) {
     if (s.echoCancellation === true) bad.push('回声消除(AEC)');
     if (s.autoGainControl === true) bad.push('自动增益(AGC)');
     if (s.noiseSuppression === true) bad.push('噪声抑制(NS)');
+    const unknown = [];
+    if (s.echoCancellation !== true && s.echoCancellation !== false) unknown.push('AEC');
+    if (s.autoGainControl !== true && s.autoGainControl !== false) unknown.push('AGC');
+    if (s.noiseSuppression !== true && s.noiseSuppression !== false) unknown.push('NS');
     if (bad.length) {
       notice('检测到浏览器仍强制开启了 ' + bad.join('、') +
         '，这些处理会显著扭曲频响测量结果。建议更换浏览器（桌面 Chrome/Edge 表现最佳）或忽略曲线的绝对形状。', 'warn');
+    } else if (unknown.length) {
+      notice('浏览器未报告 ' + unknown.join('、') + ' 的实际状态，无法确认它们已关闭。测量结果可能包含麦克风处理。', 'warn');
     } else {
       notice('', 'warn');
     }
@@ -254,7 +260,7 @@ function recomputeCurves() {
     ? alignLevel(smoothLogCurve(f, state.verifyRaw, state.smoothing), state.target, f)
     : null;
 
-  state.eq = totalEqResponseDb(state.bands, f);
+  state.eq = totalEqResponseDb(state.bands, f, state.engine?.sampleRate || SAMPLE_RATE);
 }
 
 function updateChart() {
@@ -284,7 +290,13 @@ function updateStats() {
     const zero = new Float64Array(f.length);
     const before = eqErrorRms(state.delta, zero, f);
     const after = eqErrorRms(state.delta, state.eq, f);
-    parts.push(`偏差 ${before.toFixed(1)} dB → 拟合残差 ${after.toFixed(1)} dB`);
+    parts.push(state.bypass
+      ? `初测偏差 ${before.toFixed(1)} dB · EQ 已旁通`
+      : `初测偏差 ${before.toFixed(1)} dB → 预测残差 ${after.toFixed(1)} dB`);
+    if (state.verify && state.target) {
+      const verifyDelta = Float64Array.from(f, (_, i) => state.target[i] - state.verify[i]);
+      parts.push(`复测偏差 ${eqErrorRms(verifyDelta, zero, f).toFixed(1)} dB`);
+    }
     parts.push(`${state.bands.length} 段 EQ${state.bypass ? '（已旁通）' : ''}`);
   } else {
     parts.push('等待测量');
@@ -445,12 +457,15 @@ async function startMeasure(isVerify = false) {
     setBusy(false);
   }
 
-  if (!result) {
+  if (!result || result.meta?.degraded) {
     // 失败或取消时回滚实时预览曲线，避免留下不可用于计算 EQ 的临时数据
     state.measuredRaw = prevRaw;
     state.verifyRaw = prevVerify;
     refreshAll();
     setHint(state.hasMeasurement ? '' : '完成一次测量后显示频响曲线', !state.hasMeasurement);
+    if (result?.meta?.degraded) {
+      toast('录音信号不足或解算失败，未用于自动 EQ；请检查播放、麦克风和系统音效后重测', 'warn');
+    }
     return;
   }
 
@@ -485,7 +500,12 @@ function autoEq() {
     return;
   }
   const count = clamp(Number(dom.autoBands.value) || 7, 3, EQ_LIMITS.maxBands);
-  const bands = solveEqBands(state.delta, state.grid.freqs, { bandCount: count, maxGain: 9 });
+  const bands = solveEqBands(state.delta, state.grid.freqs, {
+    bandCount: count,
+    maxGain: 9,
+    maxBoost: 4,
+    sampleRate: state.engine?.sampleRate || SAMPLE_RATE,
+  });
   if (!bands.length) {
     toast('当前偏差很小，无需额外 EQ 调整', 'info');
     return;

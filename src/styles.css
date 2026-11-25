@@ -390,6 +390,9 @@ input[type=range]::-moz-range-thumb{
   transition:width .2s ease;
 }
 .note{ margin:0; font-size:12px; line-height:1.65; color:var(--muted); }
+.measurement-guide{ border:1px solid var(--border); border-radius:9px; padding:9px 11px; background:rgba(25,40,58,.65); }
+.measurement-guide summary{ color:var(--text); font-size:12px; font-weight:600; cursor:pointer; }
+.measurement-guide p{ margin:9px 0 0; color:var(--muted); font-size:12px; line-height:1.65; }
 
 .footer{
   display:flex; align-items:center; justify-content:space-between;

@@ -163,11 +163,11 @@ export class AudioEngine extends EventTarget {
 
     const track = stream.getAudioTracks()[0];
     const actual = track && typeof track.getSettings === 'function' ? track.getSettings() : {};
-    // 实际生效值优先，缺失字段用请求值与上下文采样率补齐
+    // 浏览器未报告的处理开关保持未知；不能把请求值误报为实际关闭。
     const settings = Object.assign({
-      echoCancellation: false,
-      autoGainControl: false,
-      noiseSuppression: false,
+      echoCancellation: null,
+      autoGainControl: null,
+      noiseSuppression: null,
       sampleRate: this.ctx.sampleRate,
       channelCount: 1,
     }, actual);

@@ -19,6 +19,20 @@ import {
   createLogGrid,
 } from '../core/dsp.js';
 
+function recordingPeakDb(pcm) {
+  let peak = 0;
+  let clipped = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    const amplitude = Math.abs(pcm[i]);
+    if (amplitude > peak) peak = amplitude;
+    if (amplitude >= 0.995) clipped++;
+  }
+  const peakDb = 20 * Math.log10(peak + 1e-12);
+  if (peakDb < -60) throw new Error('录音过弱，请检查测试信号、音量和麦克风');
+  if (clipped > pcm.length * 0.001) throw new Error('录音削波，请降低播放或麦克风输入音量');
+  return peakDb;
+}
+
 export class Measurement {
   constructor(engine) {
     if (!engine) {
@@ -35,14 +49,14 @@ export class Measurement {
   }
 
   /**
-   * 粉噪测量：loop 播放粉红噪声，用 Welch 功率谱估计频响。
+   * 粉噪测量：用录音与参考粉噪的 Welch 功率谱之差估计链路频响。
    * @param {{durationSec?:number, onProgress?:(p:number)=>void}} opts
    * @returns {Promise<MeasurementResult>}
    */
   async runPinkNoise(opts = {}) {
     const { durationSec = 6, onProgress, externalPlayback = false } = opts || {};
     const sr = this.engine.sampleRate;
-    const signal = generatePinkNoise(sr, durationSec + 1, Date.now() & 0xffff);
+    const signal = generatePinkNoise(sr, Math.max(durationSec + 1, 10), 20261124);
     return this._runMeasurement({
       mode: 'pink',
       signal,
@@ -69,16 +83,15 @@ export class Measurement {
           };
         }
 
+        const peakDb = recordingPeakDb(pcm);
         const psd = welchPSD(pcm, sampleRate, 8192, 0.5);
-        const rawDb = mapToGrid(psd.freqs, psd.db, grid.freqs);
-        const smoothDb = smoothLogCurve(grid.freqs, rawDb, 6);
-
-        let peak = 0;
-        for (let i = 0; i < pcm.length; i++) {
-          const a = Math.abs(pcm[i]);
-          if (a > peak) peak = a;
+        const reference = welchPSD(signal, sampleRate, 8192, 0.5);
+        const responseDb = new Float64Array(psd.db.length);
+        for (let i = 0; i < responseDb.length; i++) {
+          responseDb[i] = psd.db[i] - reference.db[i];
         }
-        const peakDb = 20 * Math.log10(peak + 1e-12);
+        const rawDb = mapToGrid(psd.freqs, responseDb, grid.freqs);
+        const smoothDb = smoothLogCurve(grid.freqs, rawDb, 6);
 
         return {
           freqs: grid.freqs,
@@ -115,6 +128,7 @@ export class Measurement {
       externalPlayback,
       analyze: (pcm, sampleRate) => {
         const grid = createLogGrid(GRID.fMin, GRID.fMax, GRID.ppOct);
+        const inputPeakDb = recordingPeakDb(pcm);
         let res = null;
         try {
           res = deconvolveIR(pcm, chirp, sampleRate, { tailMs });
@@ -162,6 +176,7 @@ export class Measurement {
             delayMs: delaySamples / sampleRate * 1000,
             tailMs,
             peakDb,
+            inputPeakDb,
             method: 'deconvolution',
           },
         };
