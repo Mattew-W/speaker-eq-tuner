@@ -31,10 +31,13 @@
 ## 快速开始
 
 ```bash
-npm install
+npm ci --registry=https://registry.npmjs.org/ --replace-registry-host=always
+npm run manage   # 可视化启动、停止、构建与日志：http://127.0.0.1:4174/
 npm run dev      # http://localhost:5173 ，同时监听局域网
 npm run build    # 产物在 dist/
 ```
+
+`npm run manage` 打开本机开发管理页，通过页面启动或停止开发服务、执行生产构建并查看日志。管理页只监听本机；它只能停止由自己启动的服务。关闭管理进程时，所启动的开发服务也会停止。云环境如需重装依赖，使用环境设置中保存的安装脚本，它将 npm 缓存放在可写目录。
 
 需要 Node 18+。运行时零第三方依赖，`vite` 仅用于开发与构建。
 

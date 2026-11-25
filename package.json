@@ -6,6 +6,7 @@
   "description": "扬声器外放音质测量与参量 EQ 微调工具（Web Audio + getUserMedia）",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "manage": "node scripts/dev-manager.mjs",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0"
   },

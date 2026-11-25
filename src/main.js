@@ -303,11 +303,21 @@ function updateStats() {
   el.textContent = parts.join(' · ');
 }
 
+function updateEqOverview() {
+  const enabled = state.bands.filter((band) => band.enabled !== false).length;
+  $('eqConfigured').textContent = `${state.bands.length} / ${EQ_LIMITS.maxBands}`;
+  $('eqEnabled').textContent = String(enabled);
+  $('eqOutput').textContent = state.bypass ? '已旁通' : enabled ? 'EQ 生效' : '直通';
+  $('eqOutput').classList.toggle('is-bypassed', state.bypass);
+  dom.btnBypass.setAttribute('aria-pressed', String(state.bypass));
+}
+
 /** 数据变更后统一刷新：EQ 链 → 曲线 → 图表 → 统计 */
 function refreshAll() {
   recomputeCurves();
   updateChart();
   updateStats();
+  updateEqOverview();
   updateAdvice();
 }
 
