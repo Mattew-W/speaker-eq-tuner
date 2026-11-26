@@ -218,6 +218,7 @@ export const DOM_IDS = Object.freeze([
   'targetSelect', 'targetDesc', 'targetTilt', 'tiltOut', 'targetBass', 'bassOut',
   'btnAutoEq', 'autoBands',
   'btnAddBand', 'btnResetEq', 'btnBypass', 'btnExport', 'bandList',
+  'eqModeSeg', 'eqGraphic', 'eqGraphicTools', 'btnCopyGraphic', 'graphicHint', 'eqNote',
   'sourceSelect', 'fileInput', 'btnPlay', 'btnStop', 'btnVerify', 'playerNote',
   'footerInfo', 'helpModal', 'btnHelpClose', 'toast',
   'roleSwitch', 'roleHint', 'externalHint', 'syncDesc', 'adviceText', 'importText',

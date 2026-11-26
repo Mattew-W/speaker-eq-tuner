@@ -24,13 +24,17 @@ import {
   createBand, clampBand, totalEqResponseDb, solveEqBands, eqErrorRms,
 } from './core/eq-solver.js';
 import {
+  GRAPHIC_FREQS, GRAPHIC_Q, GRAPHIC_GAIN_MAX,
+  createGraphicBands, solveGraphicBands, snapGraphicIndex,
+} from './core/graphic-eq.js';
+import {
   SYNC_SWEEP_SEC, SYNC_GAP_SEC, SYNC_PINK_SEC, SYNC_F1, SYNC_F2,
   encodeAdvice, decodeAdvice, extractAdviceCode, buildTransferText,
 } from './core/sync-code.js';
 import { AudioEngine } from './audio/engine.js';
 import { Measurement } from './audio/measurement.js';
 import { ResponseChart } from './ui/chart.js';
-import { renderBandList } from './ui/controls.js';
+import { renderBandList, renderGraphicEq } from './ui/controls.js';
 
 const $ = (id) => document.getElementById(id);
 const dom = Object.create(null);
@@ -45,7 +49,8 @@ const state = {
   chart: null,
   grid: createLogGrid(),
 
-  bands: [],
+  bands: createGraphicBands(),
+  eqMode: 'graphic',   // 'graphic' = 10 段固定频段（与设备自带均衡器一致）；'parametric' = 自由参量
   bypass: false,
 
   measuredRaw: null,   // 未平滑实测（GRID 上，dB）
@@ -316,10 +321,13 @@ function updateStats() {
 }
 
 function updateEqOverview() {
-  const enabled = state.bands.filter((band) => band.enabled !== false).length;
-  $('eqConfigured').textContent = `${state.bands.length} / ${EQ_LIMITS.maxBands}`;
-  $('eqEnabled').textContent = String(enabled);
-  $('eqOutput').textContent = state.bypass ? '已旁通' : enabled ? 'EQ 生效' : '直通';
+  const isGraphic = state.eqMode === 'graphic';
+  const active = state.bands.filter((band) => band.enabled !== false && Math.abs(band.gain) >= 0.1).length;
+  $('eqConfigured').textContent = isGraphic
+    ? `${state.bands.length} 段（固定频段）`
+    : `${state.bands.length} / ${EQ_LIMITS.maxBands}`;
+  $('eqEnabled').textContent = String(active);
+  $('eqOutput').textContent = state.bypass ? '已旁通' : active ? 'EQ 生效' : '直通';
   $('eqOutput').classList.toggle('is-bypassed', state.bypass);
   dom.btnBypass.setAttribute('aria-pressed', String(state.bypass));
 }
@@ -343,6 +351,32 @@ function applyEqToEngine() {
 }
 
 function renderBands() {
+  const isGraphic = state.eqMode === 'graphic';
+  if (dom.autoBands && dom.autoBands.parentElement) dom.autoBands.parentElement.hidden = isGraphic;
+  if (dom.btnAutoEq) dom.btnAutoEq.textContent = isGraphic ? '自动计算 10 段 EQ' : '自动计算 EQ';
+  if (dom.eqGraphic) dom.eqGraphic.hidden = !isGraphic;
+  if (dom.eqGraphicTools) dom.eqGraphicTools.hidden = !isGraphic;
+  if (dom.graphicHint) dom.graphicHint.hidden = !isGraphic;
+  if (dom.bandList) dom.bandList.hidden = isGraphic;
+  if (dom.btnAddBand) dom.btnAddBand.hidden = isGraphic;
+
+  if (isGraphic) {
+    renderGraphicEq(dom.eqGraphic, state.bands, {
+      onChange: (index, patch) => {
+        const b = state.bands[index];
+        if (!b) return;
+        const next = { ...b, ...patch };
+        if (typeof next.gain === 'number') {
+          next.gain = clamp(next.gain, -GRAPHIC_GAIN_MAX, GRAPHIC_GAIN_MAX);
+        }
+        state.bands[index] = clampBand(next);
+        applyEqToEngine();
+        refreshAll();
+      },
+    });
+    return;
+  }
+
   renderBandList(dom.bandList, state.bands, {
     onChange: (index, patch) => {
       const b = state.bands[index];
@@ -365,6 +399,18 @@ function renderBands() {
   });
 }
 
+/** 拖拽时只同步单个推子的显示值，避免整体重绘打断拖拽手势。 */
+function syncGraphicValue(index, gain) {
+  if (!dom.eqGraphic) return;
+  const col = dom.eqGraphic.querySelector(`.geq__col[data-index="${index}"]`);
+  if (!col) return;
+  const slider = col.querySelector('.geq__slider');
+  const num = col.querySelector('.geq__num');
+  const safe = Number.isFinite(gain) ? gain : 0;
+  if (slider) slider.value = String(safe);
+  if (num) num.value = safe.toFixed(1);
+}
+
 function addBand() {
   if (state.bands.length >= EQ_LIMITS.maxBands) {
     toast(`最多 ${EQ_LIMITS.maxBands} 段 EQ`, 'warn');
@@ -385,6 +431,79 @@ function addBand() {
   applyEqToEngine();
   renderBands();
   refreshAll();
+}
+
+/**
+ * 切换 EQ 类型。切到图形模式时，把当前 EQ 的总响应采样到 10 个标准频点，
+ * 避免切换动作丢掉已有的校正量。
+ * @param {'graphic'|'parametric'} next
+ */
+function switchEqMode(next) {
+  if (next !== 'graphic' && next !== 'parametric') return;
+  if (next === state.eqMode) return;
+  const sr = state.engine?.sampleRate || SAMPLE_RATE;
+
+  if (next === 'graphic') {
+    const bands = createGraphicBands();
+    if (state.bands.length) {
+      const total = totalEqResponseDb(state.bands, state.grid.freqs, sr);
+      const sampled = mapToGrid(state.grid.freqs, total, Float64Array.from(GRAPHIC_FREQS));
+      for (let k = 0; k < bands.length; k++) {
+        bands[k] = clampBand({
+          ...bands[k],
+          gain: clamp(sampled[k], -GRAPHIC_GAIN_MAX, GRAPHIC_GAIN_MAX),
+        });
+      }
+    }
+    state.bands = bands;
+  }
+
+  state.eqMode = next;
+  if (dom.eqModeSeg) {
+    for (const btn of dom.eqModeSeg.querySelectorAll('button[data-eqmode]')) {
+      btn.classList.toggle('is-active', btn.dataset.eqmode === next);
+    }
+  }
+  if (dom.autoBands && dom.autoBands.parentElement) dom.autoBands.parentElement.hidden = next === 'graphic';
+  if (dom.btnAutoEq) dom.btnAutoEq.textContent = next === 'graphic' ? '自动计算 10 段 EQ' : '自动计算 EQ';
+
+  applyEqToEngine();
+  renderBands();
+  refreshAll();
+  toast(next === 'graphic'
+    ? '已切换到 10 段图形 EQ（与设备自带均衡器同频段）'
+    : '已切换到自由参量 EQ', 'info');
+}
+
+/** 把 10 段增益复制为便于照抄进设备均衡器的文本。 */
+async function copyGraphicValues() {
+  if (!state.bands.length) return;
+  const label = (f) => (f >= 1000 ? `${f / 1000} kHz` : `${f} Hz`);
+  const rows = state.bands.map((b) => {
+    const g = Number.isFinite(b.gain) ? b.gain : 0;
+    const sign = g > 0 ? '+' : (g < 0 ? '-' : ' ');
+    return `${label(b.freq).padStart(7)}  ${sign}${Math.abs(g).toFixed(1)} dB`;
+  });
+  const compact = state.bands.map((b) => b.gain.toFixed(1)).join(' / ');
+  const text = `图形 EQ（10 段）——按 32/64/125/250/500 Hz、1/2/4/8/16 kHz 顺序填写\n`
+    + `${rows.join('\n')}\n\n紧凑：${compact}`;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    toast('10 段 EQ 数值已复制，可直接照抄到设备均衡器', 'ok');
+  } catch (_) {
+    toast('复制失败，请检查浏览器剪贴板权限', 'warn');
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -499,12 +618,32 @@ function autoEq() {
     toast('请先完成一次测量', 'warn');
     return;
   }
+  const sr = state.engine?.sampleRate || SAMPLE_RATE;
+  setView('delta');
+
+  // 图形模式：固定 10 段，算出的数值可直接照抄到设备自带均衡器
+  if (state.eqMode === 'graphic') {
+    const bands = solveGraphicBands(state.delta, state.grid.freqs, { maxBoost: 4, sampleRate: sr });
+    const active = bands.filter((b) => Math.abs(b.gain) >= 0.1).length;
+    state.bands = bands;
+    applyEqToEngine();
+    renderBands();
+    refreshAll();
+    toast(
+      active
+        ? `已按 10 段标准算出 EQ（${active} 段有调整），可直接照抄到设备均衡器`
+        : '当前偏差很小，10 段 EQ 接近平直',
+      active ? 'ok' : 'info',
+    );
+    return;
+  }
+
   const count = clamp(Number(dom.autoBands.value) || 7, 3, EQ_LIMITS.maxBands);
   const bands = solveEqBands(state.delta, state.grid.freqs, {
     bandCount: count,
     maxGain: 9,
     maxBoost: 4,
-    sampleRate: state.engine?.sampleRate || SAMPLE_RATE,
+    sampleRate: sr,
   });
   if (!bands.length) {
     toast('当前偏差很小，无需额外 EQ 调整', 'info');
@@ -514,7 +653,6 @@ function autoEq() {
   applyEqToEngine();
   renderBands();
   refreshAll();
-  setView('delta');
   toast(`已生成 ${bands.length} 段 EQ 建议，可继续手动微调`, 'ok');
 }
 
@@ -851,13 +989,20 @@ function bindEvents() {
 
   // EQ
   dom.btnAutoEq.addEventListener('click', autoEq);
+  if (dom.eqModeSeg) {
+    dom.eqModeSeg.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-eqmode]');
+      if (btn) switchEqMode(btn.dataset.eqmode);
+    });
+  }
+  if (dom.btnCopyGraphic) dom.btnCopyGraphic.addEventListener('click', copyGraphicValues);
   dom.btnAddBand.addEventListener('click', addBand);
   dom.btnResetEq.addEventListener('click', () => {
-    state.bands = [];
+    state.bands = state.eqMode === 'graphic' ? createGraphicBands() : [];
     applyEqToEngine();
     renderBands();
     refreshAll();
-    toast('EQ 已重置', 'info');
+    toast(state.eqMode === 'graphic' ? '10 段 EQ 已全部归零' : 'EQ 已重置', 'info');
   });
   dom.btnBypass.addEventListener('click', () => {
     state.bypass = !state.bypass;
@@ -869,23 +1014,24 @@ function bindEvents() {
   dom.btnExport.addEventListener('click', exportJson);
 
   // 图表拖拽（礼部派发到 canvas 上的自定义事件）
-  dom.chartCanvas.addEventListener('banddrag', (e) => {
-    const { index, freq, gain } = e.detail;
+  // 图形 EQ 模式下频率锁定在标准频点，只允许改增益；参量模式频率可自由拖动。
+  const handleBandDrag = (e, redraw) => {
+    const { index, freq, gain } = e.detail || {};
     const b = state.bands[index];
     if (!b) return;
-    state.bands[index] = clampBand({ ...b, freq, gain });
+    const isGraphic = state.eqMode === 'graphic';
+    const nextFreq = isGraphic ? b.freq : freq;
+    const nextGain = isGraphic ? clamp(gain, -GRAPHIC_GAIN_MAX, GRAPHIC_GAIN_MAX) : gain;
+    state.bands[index] = clampBand({ ...b, freq: nextFreq, gain: nextGain });
     applyEqToEngine();
+    if (redraw) {
+      if (isGraphic) syncGraphicValue(index, state.bands[index].gain);
+      else renderBands();
+    }
     refreshAll();
-  });
-  dom.chartCanvas.addEventListener('bandchange', (e) => {
-    const { index, freq, gain } = e.detail;
-    const b = state.bands[index];
-    if (!b) return;
-    state.bands[index] = clampBand({ ...b, freq, gain });
-    applyEqToEngine();
-    renderBands();
-    refreshAll();
-  });
+  };
+  dom.chartCanvas.addEventListener('banddrag', (e) => handleBandDrag(e, false));
+  dom.chartCanvas.addEventListener('bandchange', (e) => handleBandDrag(e, true));
 
   // 播放
   dom.btnPlay.addEventListener('click', playSource);

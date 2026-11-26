@@ -74,12 +74,16 @@
       </div>
     </section>
 
-    <!-- ============ 参量 EQ ============ -->
+    <!-- ============ EQ 调整 ============ -->
     <section class="panel panel--eq" id="eqPanel">
       <div class="panel__head">
-        <h2><em>3</em> 参量 EQ</h2>
+        <h2><em>3</em> EQ 调整</h2>
         <div class="btn-row">
-          <button id="btnAddBand" class="btn btn--sm" type="button">+ 添加频段</button>
+          <div class="seg" id="eqModeSeg" role="group" aria-label="EQ 类型">
+            <button class="is-active" data-eqmode="graphic" type="button">图形 · 10 段</button>
+            <button data-eqmode="parametric" type="button">参量 · 自由</button>
+          </div>
+          <button id="btnAddBand" class="btn btn--sm" type="button" hidden>+ 添加频段</button>
           <button id="btnResetEq" class="btn btn--sm" type="button">重置</button>
           <button id="btnBypass" class="btn btn--sm" type="button">旁通：关</button>
           <button id="btnExport" class="btn btn--sm" type="button">导出 JSON</button>
@@ -90,8 +94,13 @@
         <div><span>启用频段</span><strong id="eqEnabled">0</strong></div>
         <div><span>播放链状态</span><strong id="eqOutput">直通</strong></div>
       </div>
-      <div id="bandList" class="band-list"></div>
-      <p class="note">拖动图表上的圆点可改频率（横向）与增益（纵向）；下方滑杆可调 Q 值与精确参数。EQ 作用于播放链，可实时试听。</p>
+      <div id="eqGraphic" class="geq" aria-label="10 段图形 EQ"></div>
+      <div id="bandList" class="band-list" hidden></div>
+      <div class="btn-row eq-tools" id="eqGraphicTools">
+        <button id="btnCopyGraphic" class="btn btn--sm" type="button">复制 10 段数值</button>
+        <span class="note note--inline" id="graphicHint">图形 EQ 与设备自带均衡器同频段，算出的数值可直接照抄。</span>
+      </div>
+      <p id="eqNote" class="note">10 段图形 EQ 的标准频段为 32/64/125/250/500 Hz、1/2/4/8/16 kHz，与手机、播放器自带的均衡器一致，算完可直接照抄。拖动图表上的圆点只能改增益（频率锁定）。EQ 作用于播放链，可实时试听。</p>
     </section>
       </div>
 

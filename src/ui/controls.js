@@ -6,6 +6,7 @@
  * ===========================================================================
  */
 import { EQ_LIMITS } from '../contracts.js';
+import { GRAPHIC_GAIN_MAX } from '../core/graphic-eq.js';
 
 /** 滤波器类型下拉项（固定枚举，非用户输入） */
 const BAND_TYPES = [
@@ -204,4 +205,107 @@ export function renderBandList(container, bands, handlers) {
     frag.appendChild(createBandCard(list[i], i, onChange, onRemove));
   }
   container.appendChild(frag);
+}
+
+/** 频率标签：1000 -> 1k、16000 -> 16k，与设备均衡器面板一致 */
+function freqLabel(f) {
+  return f >= 1000 ? `${f / 1000}k` : String(f);
+}
+
+/**
+ * 渲染 10 段图形 EQ 推子。中心频率固定（32/64/125/250/500 Hz、1/2/4/8/16 kHz），
+ * 与手机、播放器自带的图形均衡器同频段，算出的数值可原样照抄。
+ * 只在结构变化时整体重绘；拖拽过程中的数值同步由 main.js 做元素级更新。
+ * @param {HTMLElement} container 容器（#eqGraphic）
+ * @param {Array} bands 频段数组（仅读取，绝不修改）
+ * @param {{ onChange: (index:number, patch:Object)=>void }} handlers 变更回调
+ */
+export function renderGraphicEq(container, bands, handlers) {
+  if (!container) return;
+  const onChange = (handlers && typeof handlers.onChange === 'function') ? handlers.onChange : () => {};
+  const list = Array.isArray(bands) ? bands : [];
+  const max = GRAPHIC_GAIN_MAX;
+
+  container.textContent = '';
+
+  const yAxis = document.createElement('div');
+  yAxis.className = 'geq__yaxis';
+  yAxis.setAttribute('aria-hidden', 'true');
+  ['+' + max, '0', '-' + max].forEach((text, k) => {
+    const mark = document.createElement('span');
+    mark.className = `geq__ymark geq__ymark--${['top', 'mid', 'bottom'][k]}`;
+    mark.textContent = text;
+    yAxis.appendChild(mark);
+  });
+  container.appendChild(yAxis);
+
+  const bank = document.createElement('div');
+  bank.className = 'geq__bank';
+  bank.setAttribute('role', 'group');
+  bank.setAttribute('aria-label', '10 段图形均衡器');
+
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i] || {};
+    const freq = num(b.freq, 1000);
+    const gain = clamp(num(b.gain, 0), -max, max);
+    const enabled = b.enabled !== false;
+
+    const col = document.createElement('div');
+    col.className = 'geq__col' + (enabled ? '' : ' is-off');
+    col.dataset.index = String(i);
+
+    const numInput = document.createElement('input');
+    numInput.className = 'geq__num';
+    numInput.id = `geq-${i}`;
+    numInput.type = 'number';
+    numInput.min = String(-max);
+    numInput.max = String(max);
+    numInput.step = '0.5';
+    numInput.value = gain.toFixed(1);
+    numInput.setAttribute('aria-label', `${freqLabel(freq)}Hz 增益`);
+
+    const rail = document.createElement('div');
+    rail.className = 'geq__rail';
+
+    const slider = document.createElement('input');
+    slider.className = 'geq__slider';
+    slider.type = 'range';
+    slider.min = String(-max);
+    slider.max = String(max);
+    slider.step = '0.5';
+    slider.value = String(gain);
+    slider.setAttribute('orient', 'vertical');
+    slider.setAttribute('aria-label', `${freqLabel(freq)}Hz 增益推子`);
+
+    slider.addEventListener('input', () => {
+      const v = clamp(num(slider.value, 0), -max, max);
+      numInput.value = v.toFixed(1);
+      onChange(i, { gain: v });
+    });
+    numInput.addEventListener('change', () => {
+      const v = clamp(num(numInput.value, 0), -max, max);
+      numInput.value = v.toFixed(1);
+      slider.value = String(v);
+      onChange(i, { gain: v });
+    });
+    // 双击任一控件归零，便于快速复位单段
+    slider.addEventListener('dblclick', () => {
+      slider.value = '0';
+      numInput.value = '0.0';
+      onChange(i, { gain: 0 });
+    });
+
+    rail.appendChild(slider);
+
+    const freqTag = document.createElement('span');
+    freqTag.className = 'geq__freq';
+    freqTag.textContent = freqLabel(freq);
+
+    col.appendChild(numInput);
+    col.appendChild(rail);
+    col.appendChild(freqTag);
+    bank.appendChild(col);
+  }
+
+  container.appendChild(bank);
 }

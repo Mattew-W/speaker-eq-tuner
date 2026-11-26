@@ -10,8 +10,13 @@ const logs = [];
 const dev = { phase: 'stopped', port: null, child: null };
 const build = { phase: 'idle', child: null };
 
+/** 剥离 ANSI 颜色与样式转义序列（Vite 输出带颜色，否则状态正则匹配不到） */
+function stripAnsi(value) {
+  return String(value).replace(/\x1b\[[0-9;]*m/g, '');
+}
+
 function record(source, chunk) {
-  const clean = String(chunk).replace(/\x1b\[[0-9;]*m/g, '').trimEnd();
+  const clean = stripAnsi(chunk).trimEnd();
   for (const line of clean.split(/\r?\n/)) {
     if (line.trim()) logs.push({ source, text: line, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
   }
@@ -19,16 +24,20 @@ function record(source, chunk) {
 }
 
 function run(args, source, onData, onClose) {
-  const child = spawn(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', ...args], {
+  const isWindows = process.platform === 'win32';
+  // Windows 上 npm 是 .cmd 批处理；Node 18.20/20.12 起（CVE-2024-27980 修复）不允许
+  // 直接 spawn .cmd/.bat，必须经 shell，否则抛 EINVAL 并终止整个管理进程。
+  const child = spawn(isWindows ? 'npm.cmd' : 'npm', ['run', ...args], {
     cwd: root,
     env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
+    detached: !isWindows,
+    shell: isWindows,
   });
   for (const stream of [child.stdout, child.stderr]) {
     stream.on('data', (data) => {
       record(source, data);
-      onData?.(String(data));
+      onData?.(stripAnsi(data));
     });
   }
   child.on('error', (error) => {
@@ -56,7 +65,7 @@ function startDev() {
   let output = '';
   const child = run(['dev'], 'dev', (data) => {
     output = (output + data).slice(-2000);
-    const match = output.match(/Local:\s+https?:\/\/localhost:(\d+)/);
+    const match = output.match(/https?:\/\/localhost:(\d+)/);
     if (match) dev.port = Number(match[1]);
     if (/ready in\s+\d+/i.test(output)) dev.phase = 'running';
   }, (code) => {
@@ -151,7 +160,7 @@ const server = createServer((request, response) => {
   } else if (request.method === 'POST' && ['/api/dev/start', '/api/dev/stop', '/api/build'].includes(url.pathname)) {
     const origin = request.headers.origin;
     if (origin && origin !== `http://${host}:${managerPort}`) return json(403, { error: '来源不匹配' });
-    if (url.pathname === '/api/dev/start') return json(startDev() ? 202 : 409, { error: '开发服务已在运行' });
+    if (url.pathname === '/api/dev/start') return json(startDev() ? 202 : 409, { error: '开发服务已在运行，或启动失败（详见右侧日志）' });
     if (url.pathname === '/api/build') return json(startBuild() ? 202 : 409, { error: '构建已在运行' });
     if (!dev.child) return json(409, { error: '开发服务未运行' });
     dev.phase = 'stopping';
@@ -167,5 +176,11 @@ function shutdown() {
 }
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
+// 兜底：单次操作（尤其子进程 spawn）失败时只记录日志，不让管理页整体退出。
+process.on('uncaughtException', (error) => {
+  record('manager', `未捕获异常，管理页继续运行：${error.message}`);
+  if (dev.phase === 'starting' && !dev.child) dev.phase = 'stopped';
+  if (build.phase === 'running' && !build.child) build.phase = 'failed';
+});
 server.on('error', (error) => { console.error(error.message); process.exitCode = 1; });
 server.listen(managerPort, host, () => console.log(`开发管理页：http://${host}:${managerPort}/`));
