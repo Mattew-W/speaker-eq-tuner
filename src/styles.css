@@ -261,6 +261,20 @@ body{
 }
 .stats{ color:var(--muted); font-size:12px; text-align:right; flex:1 1 auto; }
 
+/* 测量可信度结论行（抗干扰） */
+.quality-line{
+  margin-top:8px;
+  padding:7px 10px;
+  border-radius:8px;
+  font-size:12px;
+  line-height:1.55;
+  color:var(--muted);
+  background:var(--panel-2);
+  border:1px solid var(--border);
+}
+.quality-line.is-ok{ border-color:rgba(69,214,160,.45); color:#9fe1cb; }
+.quality-line--poor{ border-color:rgba(236,112,54,.55); color:#f3b295; background:#1d1410; }
+
 /* ---------- 表单控件 ---------- */
 .field{ display:flex; flex-direction:column; gap:6px; min-width:0; }
 .field > label{

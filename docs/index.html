@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0b1017" />
   <title>Speaker EQ Tuner · 外放音质测量与 EQ 微调</title>
-  <script type="module" crossorigin src="./assets/index-0pQWTPhV.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-LyQB6dxC.css">
+  <script type="module" crossorigin src="./assets/index-DomwX4uP.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-DvEBfwp4.css">
 </head>
 <body>
 <div class="app">
@@ -55,6 +55,7 @@
           <span class="legend__item"><i style="background:#ffb454"></i>目标</span>
           <span class="legend__item"><i style="background:#45d6a0"></i>EQ 响应</span>
           <span class="legend__item"><i style="background:#c58cff"></i>验证</span>
+          <span class="legend__item" id="legendLowConf"><i style="background:rgba(143,163,184,0.55)"></i>低可信</span>
         </div>
         <div class="view-tabs" id="viewTabs">
           <button class="tab is-active" data-view="response" type="button">频响</button>
@@ -73,6 +74,7 @@
         </div>
         <div id="curveStats" class="stats">等待测量</div>
       </div>
+      <div id="qualityStats" class="quality-line" hidden></div>
     </section>
 
     <!-- ============ EQ 调整 ============ -->
@@ -149,6 +151,10 @@
         <div class="field field--inline">
           <label class="check"><input id="bypassOnMeasure" type="checkbox" checked /> 测量时旁路 EQ</label>
           <label class="check"><input id="showRaw" type="checkbox" /> 显示原始曲线</label>
+        </div>
+
+        <div class="field field--inline">
+          <label class="check"><input id="antiInterference" type="checkbox" checked /> 抗干扰（重复 3 次 + 本底噪声门控）</label>
         </div>
 
         <div class="btn-row">
@@ -300,6 +306,16 @@
         <li>两端<b>不需要同时按键、不需要网络对时</b>：粉红噪声是稳态信号，采集窗口内任意时刻开始播放都不影响功率谱平均；扫频模式依靠互相关自动定位信号起点。因此信标采用循环播放，手机可随时开始采集。</li>
         <li>协同模式的信标参数在两端硬编码一致（扫频 5 s / 20 Hz–20 kHz / 间隔 1.5 s；粉噪 10 s 循环），请勿在两端改动扫频时长，否则解卷积参考信号失配。两端采样率不同不影响对齐。</li>
         <li>手机测的是「扬声器 → 房间 → 听音位 → 麦克风」的整体响应，仍属相对校正；目标曲线仅作听感参考，绝对精度受麦克风自身频响限制。</li>
+      </ul>
+
+      <h3>六、抗干扰（重复中值 · 噪声门控 · 可信度）</h3>
+      <ul>
+        <li>空调声、说话声、通知提示音会污染测量，其中<b>突发噪声</b>最危险：它只在某一时刻注入能量，单次测量无法分辨是噪声还是扬声器在发声。</li>
+        <li><b>重复 3 次 + 逐点中值</b>：一次突发噪声只污染其中一次，中值天然把它排除；随机噪声的估计误差也随重复次数下降。</li>
+        <li><b>先测 1 s 本底噪声</b>：得到每个频点的信噪比。信噪比不足 20 dB 的频段判定为不可信，在图上以灰色区域标出，且<b>不参与自动 EQ</b>——否则算出的 EQ 是在补偿噪声而不是补偿设备。</li>
+        <li><b>可信度色带</b>：图表底部的细条颜色表示该频段可信程度，青绿为可信、灰色为不可信。</li>
+        <li>代价是测量时间约 ×3。追求速度时可在「测量」面板取消勾选；环境安静时单次测量也已足够。</li>
+        <li>无论是否开启抗干扰：关闭系统音效（杜比/DTS/空间音频）、通知静音、优先使用<b>对数扫频</b>而非粉红噪声，这几点对结果的影响比任何算法都大。</li>
       </ul>
     </div>
   </div>

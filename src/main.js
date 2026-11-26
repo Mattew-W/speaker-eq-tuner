@@ -31,6 +31,7 @@ import {
   SYNC_SWEEP_SEC, SYNC_GAP_SEC, SYNC_PINK_SEC, SYNC_F1, SYNC_F2,
   encodeAdvice, decodeAdvice, extractAdviceCode, buildTransferText,
 } from './core/sync-code.js';
+import { maskDelta, describeQuality, reliableRanges } from './core/quality.js';
 import { AudioEngine } from './audio/engine.js';
 import { Measurement } from './audio/measurement.js';
 import { ResponseChart } from './ui/chart.js';
@@ -64,6 +65,12 @@ const state = {
   hasMeasurement: false,
   lastMeta: null,
   busy: false,
+
+  // 抗干扰：逐频点可信度评估（无需抗干扰时应全为 null）
+  weight: null,        // 0..1 可信度权重
+  snrDb: null,         // 逐频点信噪比
+  spreadDb: null,      // 重复测量标准差
+  antiInterference: true,
 
   mode: 'pink',
   role: 'standalone',
@@ -281,6 +288,7 @@ function updateChart() {
     delta: state.delta,
     eq: state.eq,
     verify: state.verify,
+    weight: state.weight,
     bands: state.bands,
   });
 }
@@ -318,6 +326,36 @@ function updateStats() {
     parts.push(state.mode === 'sweep' ? '对数扫频' : '粉红噪声');
   }
   el.textContent = parts.join(' · ');
+  updateQualityLine();
+}
+
+/** 可信度结论行：显示本次测量哪些频段可信，不可信部分已在图上打灰 */
+function updateQualityLine() {
+  const el = dom.qualityStats;
+  if (!el) return;
+  const f = state.grid.freqs;
+  if (!state.weight || !state.hasMeasurement) {
+    el.hidden = true;
+    el.textContent = '';
+    el.className = 'quality-line';
+    return;
+  }
+
+  let ok = 0;
+  for (let i = 0; i < state.weight.length && i < f.length; i++) {
+    if (state.weight[i] >= 0.5) ok++;
+  }
+  const coverage = f.length ? ok / f.length : 0;
+  const poor = coverage < 0.6;
+  const text = describeQuality(state.weight, f, state.snrDb, {
+    repeats: state.lastMeta?.repeats || 1,
+  });
+  const ranges = reliableRanges(state.weight, f, 0.5);
+  el.textContent = ranges.length
+    ? `${poor ? '⚠ ' : ''}${text} · 已排除 ${ranges.length} 段可信频段之外的数据，不参与自动 EQ`
+    : `${text} · 全频段信噪比不足，建议提高音量或换安静环境重测`;
+  el.hidden = false;
+  el.className = 'quality-line' + (poor ? ' quality-line--poor' : ' is-ok');
 }
 
 function updateEqOverview() {
@@ -542,21 +580,30 @@ async function startMeasure(isVerify = false) {
   const savedBypass = state.bypass;
   const prevRaw = state.measuredRaw;
   const prevVerify = state.verifyRaw;
+  const prevWeight = state.weight;
+  const prevSnr = state.snrDb;
+  const prevSpread = state.spreadDb;
+
+  // 抗干扰：多次重复取逐点中值，并先测本底噪声作为信噪比参考
+  const anti = state.antiInterference && dom.antiInterference ? dom.antiInterference.checked : state.antiInterference;
+  // 协同模式每轮要采两个信标周期（约 13.8 s），重复次数降到 2 以免总时长不可接受
+  const repeats = anti ? (external ? 2 : 3) : 1;
+  const noiseFloorSec = anti ? 1 : 0;
   if (bypassForMeasure) eng.setBypass(true);
 
   setBusy(true, '采集中…');
   dom.measureNote.textContent = external
-    ? '本机只采集、不发声。请确认电脑端正在循环播放对应的测试信号；手机放到听音位并保持静止。'
+    ? `本机只采集、不发声。请确认电脑端正在循环播放对应的测试信号；手机放到听音位并保持静止。${anti ? `将重复 ${repeats} 次取中值。` : ''}`
     : (isVerify
-      ? '正在验证：EQ 保持生效，请勿移动设备或改变音量。'
+      ? `正在验证：EQ 保持生效，请勿移动设备或改变音量。${anti ? `将重复 ${repeats} 次取中值。` : ''}`
       : (state.mode === 'sweep'
-        ? '正在播放对数扫频… 请保持安静，不要移动设备。'
-        : '正在播放粉红噪声… 请保持安静，不要移动设备。'));
+        ? `正在播放对数扫频… 请保持安静，不要移动设备。${anti ? `先测 ${noiseFloorSec}s 本底噪声，再重复 ${repeats} 次。` : ''}`
+        : `正在播放粉红噪声… 请保持安静，不要移动设备。${anti ? `先测 ${noiseFloorSec}s 本底噪声，再重复 ${repeats} 次。` : ''}`));
   setHint('准备采集…');
 
   let result = null;
   try {
-    const opts = { durationSec, onProgress, externalPlayback: external };
+    const opts = { durationSec, onProgress, externalPlayback: external, repeats, noiseFloorSec };
     result = state.mode === 'sweep'
       ? await state.measurement.runSweep({
         ...opts,
@@ -580,6 +627,9 @@ async function startMeasure(isVerify = false) {
     // 失败或取消时回滚实时预览曲线，避免留下不可用于计算 EQ 的临时数据
     state.measuredRaw = prevRaw;
     state.verifyRaw = prevVerify;
+    state.weight = prevWeight;
+    state.snrDb = prevSnr;
+    state.spreadDb = prevSpread;
     refreshAll();
     setHint(state.hasMeasurement ? '' : '完成一次测量后显示频响曲线', !state.hasMeasurement);
     if (result?.meta?.degraded) {
@@ -590,6 +640,9 @@ async function startMeasure(isVerify = false) {
 
   const raw = clampCurve(result.rawDb || result.smoothDb);
   state.lastMeta = result.meta || {};
+  state.weight = result.weight || null;
+  state.snrDb = result.snrDb || null;
+  state.spreadDb = result.spreadDb || null;
 
   if (isVerify && state.hasMeasurement) {
     state.verifyRaw = raw;
@@ -621,9 +674,13 @@ function autoEq() {
   const sr = state.engine?.sampleRate || SAMPLE_RATE;
   setView('delta');
 
+  // 可信度掩蔽：被噪声淹没的频段权重趋 0，不参与拟合，避免把噪声当成需要补偿的偏差
+  const goal = state.weight ? maskDelta(state.delta, state.weight) : state.delta;
+  const masked = Boolean(state.weight);
+
   // 图形模式：固定 10 段，算出的数值可直接照抄到设备自带均衡器
   if (state.eqMode === 'graphic') {
-    const bands = solveGraphicBands(state.delta, state.grid.freqs, { maxBoost: 4, sampleRate: sr });
+    const bands = solveGraphicBands(goal, state.grid.freqs, { maxBoost: 4, sampleRate: sr });
     const active = bands.filter((b) => Math.abs(b.gain) >= 0.1).length;
     state.bands = bands;
     applyEqToEngine();
@@ -631,7 +688,7 @@ function autoEq() {
     refreshAll();
     toast(
       active
-        ? `已按 10 段标准算出 EQ（${active} 段有调整），可直接照抄到设备均衡器`
+        ? `已按 10 段标准算出 EQ（${active} 段有调整）${masked ? '，已排除低信噪比频段' : ''}，可直接照抄到设备均衡器`
         : '当前偏差很小，10 段 EQ 接近平直',
       active ? 'ok' : 'info',
     );
@@ -639,7 +696,7 @@ function autoEq() {
   }
 
   const count = clamp(Number(dom.autoBands.value) || 7, 3, EQ_LIMITS.maxBands);
-  const bands = solveEqBands(state.delta, state.grid.freqs, {
+  const bands = solveEqBands(goal, state.grid.freqs, {
     bandCount: count,
     maxGain: 9,
     maxBoost: 4,
@@ -979,6 +1036,15 @@ function bindEvents() {
     if (state.chart) state.chart.setShowRaw(state.showRaw);
     updateChart();
   });
+
+  if (dom.antiInterference) {
+    dom.antiInterference.addEventListener('change', () => {
+      state.antiInterference = dom.antiInterference.checked;
+      dom.measureNote.textContent = state.antiInterference
+        ? '抗干扰已开启：先测 1 s 本底噪声，再重复采集取逐点中值；低信噪比频段会在图上打灰且不参与自动 EQ。'
+        : '抗干扰已关闭：单次测量，速度快但无法识别被噪声污染的频段。';
+    });
+  }
 
   // 测量
   dom.btnMeasure.addEventListener('click', () => startMeasure(false));

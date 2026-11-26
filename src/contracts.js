@@ -212,9 +212,9 @@ export const REF_BAND = Object.freeze({ lo: 300, hi: 3000 });
  * ------------------------------------------------------------------------- */
 export const DOM_IDS = Object.freeze([
   'statusCtx', 'statusMic', 'statusRate', 'btnHelp', 'noticeBar',
-  'chartLegend', 'viewTabs', 'chartCanvas', 'chartHint', 'levelBar', 'levelText', 'curveStats',
+  'chartLegend', 'viewTabs', 'chartCanvas', 'chartHint', 'levelBar', 'levelText', 'curveStats', 'qualityStats',
   'measureMode', 'duration', 'durationOut', 'tailMs', 'tailOut', 'outputGain', 'outputGainOut',
-  'smoothing', 'bypassOnMeasure', 'showRaw', 'btnMeasure', 'btnCancel', 'measureProgress', 'measureNote',
+  'smoothing', 'bypassOnMeasure', 'showRaw', 'antiInterference', 'btnMeasure', 'btnCancel', 'measureProgress', 'measureNote',
   'targetSelect', 'targetDesc', 'targetTilt', 'tiltOut', 'targetBass', 'bassOut',
   'btnAutoEq', 'autoBands',
   'btnAddBand', 'btnResetEq', 'btnBypass', 'btnExport', 'bandList',

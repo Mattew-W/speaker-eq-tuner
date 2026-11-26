@@ -25,6 +25,45 @@ function clamp(v, lo, hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/** 可信度色带高度（CSS 像素），紧贴绘图区下边界内侧 */
+const RIBBON_H = 4;
+/** 可信度色带量化档数：8 档足以表达 0..1 的分布，又能把 fill 调用压到 8 次 */
+const CONF_BUCKETS = 8;
+/** 可信度低于该阈值视为该频点数据不可用 */
+const UNTRUSTED_THRESHOLD = 0.5;
+
+/** 不可信区背景带填充色（COLORS.axis 的低透明度） */
+const UNTRUSTED_FILL = 'rgba(143,163,184,0.13)';
+
+/**
+ * 可信度 0..1 线性插值为 rgba 填充色：0 -> 灰蓝 30%，1 -> 青绿 95%。
+ * @param {number} t 可信度（会被钳制到 0..1）
+ * @returns {string} 可直接赋给 ctx.fillStyle 的 rgba 字符串
+ */
+function confidenceFill(t) {
+  const k = clamp(Number.isFinite(t) ? t : 0, 0, 1);
+  const r = Math.round(143 + (93 - 143) * k);
+  const g = Math.round(163 + (202 - 163) * k);
+  const b = Math.round(184 + (165 - 184) * k);
+  const a = 0.30 + (0.95 - 0.30) * k;
+  return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+}
+
+/**
+ * 校验可信度权重是否可用（只读取用，不复制、不修改）。
+ * 缺失 / 非数组型 / 长度不足 freqs 时返回 null，调用方据此完全跳过绘制，
+ * 保证无 weight 时的绘制路径与旧版逐字一致。
+ * @param {ArrayLike<number>|null|undefined} weight
+ * @param {ArrayLike<number>|null|undefined} freqs
+ * @returns {ArrayLike<number>|null} 可用的权重数组
+ */
+function pickWeight(weight, freqs) {
+  if (!weight || !freqs) return null;
+  if (typeof weight.length !== 'number' || typeof freqs.length !== 'number') return null;
+  if (freqs.length < 2 || weight.length < freqs.length) return null;
+  return weight;
+}
+
 /**
  * 频响图表。构造后即监听容器尺寸并自动 HiDPI 重绘。
  */
@@ -114,6 +153,19 @@ export class ResponseChart {
     return plot.x + (Math.log(freq / F_MIN) / LOG_SPAN) * plot.w;
   }
 
+  /**
+   * 频率 -> x，并钳制到绘图区左右边界（供可信度层使用）。
+   * 非有限或非正频率返回 NaN，由调用方跳过，避免产生 NaN 绘制指令。
+   * @param {number} freq 频率 Hz
+   * @returns {number} 绘图区内的 x 坐标
+   */
+  _clampedX(freq) {
+    const x = this._xOf(freq);
+    if (!Number.isFinite(x)) return NaN;
+    const plot = this._plot();
+    return clamp(x, plot.x, plot.x + plot.w);
+  }
+
   /** dB -> y（按当前 Y 轴范围线性映射） */
   _yOf(db) {
     if (!Number.isFinite(db)) return NaN;
@@ -198,6 +250,96 @@ export class ResponseChart {
       else { ctx.moveTo(x, y); drawing = true; }
     }
     ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * 绘制「不可信区背景带」：把 weight < 0.5 的连续下标合并成区间，
+   * 在每个区间覆盖的频段上填满整高的竖直矩形。
+   * 所有区间共用同一个 fillStyle 与同一条 path，只调用一次 fill，避免状态切换。
+   * 权重不可用（缺失 / 长度不足）时直接返回，不产生任何绘制。
+   * @param {ArrayLike<number>} freqs 频率轴
+   * @param {ArrayLike<number>} weight 逐频点可信度 0..1
+   */
+  _drawUncertainBands(freqs, weight) {
+    const n = Math.min(freqs.length, weight.length);
+    if (n < 1) return;
+    const ctx = this.ctx;
+    const plot = this._plot();
+    const right = plot.x + plot.w;
+
+    ctx.save();
+    ctx.beginPath();
+    let any = false;
+    let i = 0;
+    while (i < n) {
+      if (!(weight[i] < UNTRUSTED_THRESHOLD)) { i++; continue; }
+      let end = i;
+      while (end + 1 < n && weight[end + 1] < UNTRUSTED_THRESHOLD) end++;
+      // 区间右沿取下一个可用频点的位置；一直延续到末点则补到绘图区右边界
+      const xa = this._clampedX(freqs[i]);
+      const xb = end + 1 < n ? this._clampedX(freqs[end + 1]) : right;
+      if (Number.isFinite(xa) && Number.isFinite(xb) && xb > xa) {
+        ctx.rect(xa, plot.y, xb - xa, plot.h);
+        any = true;
+      }
+      i = end + 1;
+    }
+    if (any) {
+      ctx.fillStyle = UNTRUSTED_FILL;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * 绘制「可信度色带」：绘图区底部内侧 4px 高、横贯全宽。
+   * 每个频点占一个宽度为其频率间隔的小矩形；颜色按 weight 线性插值（0 灰蓝 / 1 青绿）。
+   * 为限制状态切换，先把 weight 量化为 8 档，逐档合并 path 后各 fill 一次。
+   * 权重不可用（缺失 / 长度不足）时直接返回。
+   * @param {ArrayLike<number>} freqs 频率轴（对数、升序）
+   * @param {ArrayLike<number>} weight 逐频点可信度 0..1
+   */
+  _drawConfidenceRibbon(freqs, weight) {
+    const n = Math.min(freqs.length, weight.length);
+    if (n < 1) return;
+    const ctx = this.ctx;
+    const plot = this._plot();
+    const right = plot.x + plot.w;
+    const top = plot.y + plot.h - RIBBON_H;
+
+    // 每档取档位中点做颜色插值，保证同档共用一条 path 与一个 fillStyle
+    const fills = new Array(CONF_BUCKETS);
+    for (let k = 0; k < CONF_BUCKETS; k++) {
+      fills[k] = confidenceFill((k + 0.5) / CONF_BUCKETS);
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(plot.x, plot.y, plot.w, plot.h);
+    ctx.clip();
+
+    for (let k = 0; k < CONF_BUCKETS; k++) {
+      ctx.beginPath();
+      let any = false;
+      for (let i = 0; i < n; i++) {
+        const w = weight[i];
+        if (!Number.isFinite(w)) continue;
+        const bucket = Math.min(CONF_BUCKETS - 1, Math.floor(clamp(w, 0, 1) * CONF_BUCKETS));
+        if (bucket !== k) continue;
+        const xa = this._clampedX(freqs[i]);
+        const xb = i + 1 < n ? this._clampedX(freqs[i + 1]) : right;
+        if (!Number.isFinite(xa) || !Number.isFinite(xb)) continue;
+        const dw = xb - xa;
+        if (!(dw > 0)) continue;
+        ctx.rect(xa, top, dw, RIBBON_H);
+        any = true;
+      }
+      if (any) {
+        ctx.fillStyle = fills[k];
+        ctx.fill();
+      }
+    }
     ctx.restore();
   }
 
@@ -317,6 +459,10 @@ export class ResponseChart {
 
     const data = this._data;
     const freqs = data && data.freqs;
+    const weight = pickWeight(data && data.weight, freqs);
+
+    // 不可信频段背景带：网格之后、曲线之前，避免遮挡数据本身
+    if (weight) this._drawUncertainBands(freqs, weight);
 
     // delta 视图额外画一条 0 dB 参考线
     if (this._view === 'delta') {
@@ -351,6 +497,9 @@ export class ResponseChart {
       }
     }
     ctx.restore();
+
+    // 可信度色带：贴在绘图区底边内侧，画在曲线之后（不遮挡曲线主体）
+    if (weight) this._drawConfidenceRibbon(freqs, weight);
 
     this._drawBands();
   }
