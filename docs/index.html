@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#0b1017" />
   <title>Speaker EQ Tuner · 外放音质测量与 EQ 微调</title>
-  <script type="module" crossorigin src="./assets/index-DomwX4uP.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-DvEBfwp4.css">
+  <script type="module" crossorigin src="./assets/index-Diz8Sohb.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-B6bQLla-.css">
 </head>
 <body>
 <div class="app">
@@ -75,6 +75,7 @@
         <div id="curveStats" class="stats">等待测量</div>
       </div>
       <div id="qualityStats" class="quality-line" hidden></div>
+      <div id="measureDiag" class="stats stats--diag" hidden></div>
     </section>
 
     <!-- ============ EQ 调整 ============ -->
@@ -134,8 +135,8 @@
 
         <div class="field-row">
           <div class="field">
-            <label>输出电平 <output id="outputGainOut" class="mono">−12 dB</output></label>
-            <input id="outputGain" type="range" min="-36" max="-3" step="1" value="-12" />
+            <label>输出电平 <output id="outputGainOut" class="mono">−3 dB</output></label>
+            <input id="outputGain" type="range" min="-36" max="0" step="1" value="-3" />
           </div>
           <div class="field">
             <label>平滑</label>
@@ -162,10 +163,10 @@
           <button id="btnCancel" class="btn" type="button" disabled>停止</button>
         </div>
         <div class="progress"><i id="measureProgress"></i></div>
-        <p id="measureNote" class="note">请先把设备音量调到常用档位，保持手机/麦克风与扬声器相对位置固定。</p>
+        <p id="measureNote" class="note">把设备音量调到常用档位，保持手机/麦克风与扬声器相对位置固定。录音电平偏小不影响频响——它只影响信噪比，够用就行。</p>
         <details class="measurement-guide">
           <summary>测量前检查：杜比、DTS 与系统音效</summary>
-          <p>浏览器无法读取这些开关。想测扬声器本身，请关闭空间音频、虚拟环绕、低音增强和音量均衡；想测日常听音链路，可保留音效，但测量、试听、验证时须保持相同模式和音量。动态音效与虚拟环绕不能靠单个麦克风位置准确校正。</p>
+          <p>浏览器无法读取这些开关。想测扬声器本身，请关闭空间音频、虚拟环绕、低音增强和音量均衡；想测日常听音链路，可保留音效，但测量、试听、验证时须保持相同模式和音量。动态音效与虚拟环绕不能靠单个麦克风位置准确校正。另外，输出电平 0 dB 是数字满幅：小喇叭在大音量下容易失真，失真会污染频响，听着明显破音就调到 −6 dB 以下。</p>
         </details>
         <div id="externalHint" class="external-hint" hidden>
           <b>测量端协同流程</b>

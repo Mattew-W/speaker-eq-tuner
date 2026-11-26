@@ -12,11 +12,15 @@
 
 /**
  * 质量评估默认参数（冻结对象，禁止外部修改）
+ *
+ * 阈值按「实际频响误差」标定：粉噪在逐点 SNR 25 dB 时平滑后误差约 0.1 dB、
+ * 15 dB 时约 0.8 dB，故 12 dB 起算可信、24 dB 起完全可信；扫频已补处理增益，
+ * 同一标尺适用。旧值 20/30 对手机麦克风过严，会把正常测量判成「音量太小」。
  * @type {Readonly<{snrMinDb:number, snrFullDb:number, spreadMaxDb:number, weightThreshold:number, loHz:number, hiHz:number}>}
  */
 export const QUALITY_DEFAULTS = Object.freeze({
-  snrMinDb: 20,
-  snrFullDb: 30,
+  snrMinDb: 12,
+  snrFullDb: 24,
   spreadMaxDb: 3,
   weightThreshold: 0.5,
   loHz: 25,
@@ -398,19 +402,28 @@ export function describeQuality(weight, freqs, snrArr, meta) {
   const good = coverage >= 0.6 && longestSpan >= 2 && longest !== null;
   const minSnr = minSnrReliable === Infinity ? minSnrAll : minSnrReliable;
   const snrText = Number.isFinite(minSnr) ? `，最小 SNR ${Math.round(minSnr)} dB` : '';
+  const noiseFloorDb = meta && Number.isFinite(meta.noiseFloorDb) ? meta.noiseFloorDb : null;
+  const broadbandSnrDb = meta && Number.isFinite(meta.broadbandSnrDb) ? meta.broadbandSnrDb : null;
+  const noisyRoom = noiseFloorDb !== null && noiseFloorDb > -45;
 
   if (good) {
     return `可信 ${formatHz(longest.lo)}–${formatHz(longest.hi)}（${repeats} 次重复${snrText}）`;
   }
 
+  // 失败原因要分清：没听到播放声 / 房间太吵 / 只是个别频段弱，这三者的处置完全不同
   if (reliableCount === 0) {
-    const hint =
-      Number.isFinite(minSnrAll) && minSnrAll < QUALITY_DEFAULTS.snrMinDb
-        ? '整体信噪比不足，建议提高音量或关闭环境噪声源'
-        : '重复测量差异过大或环境噪声过强，建议提高音量、关闭噪声源后重测';
-    return hint;
+    if (broadbandSnrDb !== null && broadbandSnrDb < 3) {
+      return '几乎只录到环境噪声：请确认播放端真的在发声、输出设备是扬声器而不是耳机';
+    }
+    if (noisyRoom) {
+      return `本底噪声偏高（${Math.round(noiseFloorDb)} dBFS），先关掉空调、风扇等噪声源再重测`;
+    }
+    return '可信频点全被噪声淹没：换「对数扫频」模式（抗噪强得多）或让麦克风靠近扬声器后重测';
   }
 
   const pct = Math.round(coverage * 100);
-  return `可信频段仅占 ${pct}%（可信 ${formatHz(longest.lo)}–${formatHz(longest.hi)}${snrText}），建议提高音量或关闭环境噪声源后重测`;
+  const why = noisyRoom
+    ? `本底噪声偏高（${Math.round(noiseFloorDb)} dBFS）`
+    : '个别频段被噪声盖过或扬声器本身几乎不发声';
+  return `可信频段仅占 ${pct}%（可信 ${formatHz(longest.lo)}–${formatHz(longest.hi)}${snrText}）：${why}，这些频段不参与自动 EQ`;
 }

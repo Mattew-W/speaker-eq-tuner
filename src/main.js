@@ -31,7 +31,7 @@ import {
   SYNC_SWEEP_SEC, SYNC_GAP_SEC, SYNC_PINK_SEC, SYNC_F1, SYNC_F2,
   encodeAdvice, decodeAdvice, extractAdviceCode, buildTransferText,
 } from './core/sync-code.js';
-import { maskDelta, describeQuality, reliableRanges } from './core/quality.js';
+import { maskDelta, describeQuality } from './core/quality.js';
 import { AudioEngine } from './audio/engine.js';
 import { Measurement } from './audio/measurement.js';
 import { ResponseChart } from './ui/chart.js';
@@ -327,6 +327,7 @@ function updateStats() {
   }
   el.textContent = parts.join(' · ');
   updateQualityLine();
+  updateDiagLine();
 }
 
 /** 可信度结论行：显示本次测量哪些频段可信，不可信部分已在图上打灰 */
@@ -349,11 +350,12 @@ function updateQualityLine() {
   const poor = coverage < 0.6;
   const text = describeQuality(state.weight, f, state.snrDb, {
     repeats: state.lastMeta?.repeats || 1,
+    noiseFloorDb: state.lastMeta?.noiseFloorDb,
+    broadbandSnrDb: state.lastMeta?.broadbandSnrDb,
   });
-  const ranges = reliableRanges(state.weight, f, 0.5);
-  el.textContent = ranges.length
-    ? `${poor ? '⚠ ' : ''}${text} · 已排除 ${ranges.length} 段可信频段之外的数据，不参与自动 EQ`
-    : `${text} · 全频段信噪比不足，建议提高音量或换安静环境重测`;
+  el.textContent = poor
+    ? `⚠ ${text}`
+    : `${text} · 不可信频段已在图上打灰，不参与自动 EQ`;
   el.hidden = false;
   el.className = 'quality-line' + (poor ? ' quality-line--poor' : ' is-ok');
 }
@@ -997,7 +999,7 @@ function bindEvents() {
     dom.btnMeasure.textContent = state.mode === 'sweep' ? '开始扫频测量' : '开始测量';
     dom.measureNote.textContent = state.mode === 'sweep'
       ? '精密模式：扫频 + 互相关对齐 + 解卷积，可抑制环境噪声与房间反射。'
-      : '请先把设备音量调到常用档位，保持手机/麦克风与扬声器相对位置固定。';
+      : '把设备音量调到常用档位，保持手机/麦克风与扬声器相对位置固定。录音电平偏小不影响频响——它只影响信噪比，够用就行。';
   });
 
   // 数值控件
@@ -1156,11 +1158,40 @@ function startLevelMeter() {
     if (!e || !e.micReady) return;
     let db = -100;
     try { db = e.getInputLevelDb(); } catch (_) { return; }
-    const pct = clamp((db + 60) / 60 * 100, 0, 100);
+    // 刻度放到 -80..0 dBFS：手机麦克风关掉 AGC 后常年在 -40~-55 dBFS，
+    // 旧刻度 -60..0 会把正常电平画成一小截，看起来像「声音太小」。
+    const pct = clamp((db + 80) / 80 * 100, 0, 100);
     dom.levelBar.style.width = pct.toFixed(1) + '%';
-    dom.levelBar.style.background = db > -6 ? '#ff6b6b' : (db > -18 ? '#ffb454' : '#45d6a0');
-    dom.levelText.textContent = fmtDb(db);
+    dom.levelBar.style.background = db > -3 ? '#ff6b6b' : (db > -12 ? '#ffb454' : '#45d6a0');
+    dom.levelText.textContent = db <= -100 ? '−∞ dBFS' : `${db.toFixed(0)} dBFS`;
   }, 120);
+}
+
+/**
+ * 测量诊断行：把「峰值 / 本底 / 宽带 SNR / 扫频处理增益」摊开给用户看，
+ * 避免只给一句「音量太小」却拿不出依据。
+ */
+function updateDiagLine() {
+  const el = dom.measureDiag;
+  if (!el) return;
+  const m = state.lastMeta;
+  if (!m || !state.hasMeasurement) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  const parts = [];
+  if (Number.isFinite(m.inputPeakDb)) parts.push(`峰值 ${m.inputPeakDb.toFixed(0)} dBFS`);
+  if (Number.isFinite(m.noiseFloorDb)) parts.push(`本底 ${m.noiseFloorDb.toFixed(0)} dBFS`);
+  if (Number.isFinite(m.broadbandSnrDb)) parts.push(`宽带 SNR ${Math.round(m.broadbandSnrDb)} dB`);
+  if (Number.isFinite(m.snrGainDb) && m.snrGainDb > 1) parts.push(`扫频增益 +${Math.round(m.snrGainDb)} dB`);
+  if (!parts.length) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  el.textContent = `${parts.join(' · ')}　（录音电平只影响信噪比，不影响频响；电平小但信噪比够就是准的）`;
+  el.hidden = false;
 }
 
 /* -------------------------------------------------------------------------- */

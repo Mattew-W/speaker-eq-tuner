@@ -125,22 +125,71 @@ function abortError() {
 }
 
 /**
- * 计算录音峰值电平，并校验过弱 / 削波；不满足时抛中文错误。
- * @param {Float32Array|Float64Array} pcm
- * @returns {number} 峰值 dB
+ * 只有「几乎全静音」才判失败。
+ * 频响是相对量（对齐后按 300–3000 Hz 归零），绝对录音电平不参与计算，
+ * 因此这里不设 -60 dBFS 之类的门槛：手机麦克风关闭 AGC 后常年只有 -45~-60 dBFS，
+ * 按绝对电平判失败会误伤正常测量。能不能用，只看信噪比。
  */
-function recordingPeakDb(pcm) {
+const SILENCE_PEAK_DB = -85;
+
+/**
+ * 统计录音电平并只拦截「真静音 / 削波」两种硬故障。
+ * @param {Float32Array|Float64Array} pcm
+ * @returns {{peakDb:number, rmsDb:number}}
+ */
+function recordingLevel(pcm) {
   let peak = 0;
   let clipped = 0;
+  let sum = 0;
   for (let i = 0; i < pcm.length; i++) {
     const amplitude = Math.abs(pcm[i]);
     if (amplitude > peak) peak = amplitude;
     if (amplitude >= 0.995) clipped++;
+    sum += pcm[i] * pcm[i];
   }
   const peakDb = 20 * Math.log10(peak + 1e-12);
-  if (peakDb < -60) throw new Error('录音过弱，请检查测试信号、音量和麦克风');
+  const rmsDb = 20 * Math.log10(Math.sqrt(sum / Math.max(1, pcm.length)) + 1e-12);
+  if (peakDb < SILENCE_PEAK_DB) {
+    throw new Error('录音过弱：几乎没录到声音，请确认播放端真的在响、输出设备选的是扬声器、麦克风没有被系统静音');
+  }
   if (clipped > pcm.length * 0.001) throw new Error('录音削波，请降低播放或麦克风输入音量');
-  return peakDb;
+  return { peakDb, rmsDb };
+}
+
+/** 一段 PCM 的 RMS（dBFS）；空数组返回 -120。 */
+function rmsDbOf(pcm) {
+  if (!pcm || !pcm.length) return -120;
+  let sum = 0;
+  for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
+  return 20 * Math.log10(Math.sqrt(sum / pcm.length) + 1e-12);
+}
+
+/**
+ * 扫频的处理增益（dB）。
+ *
+ * 解卷积本质是匹配滤波：与噪声比较时该用「扫频经过该频点那一刻的瞬时功率」，
+ * 而不是「整段采集的时间平均功率」。对数扫频停留时间为
+ *   dwell(f) = binHz · T / (f · ln(f2/f1))
+ * 故增益 = 10·log10(T / dwell) = 10·log10(f · ln(f2/f1) / binHz)，与扫频时长无关。
+ * 不做这项补偿，扫频模式的逐点 SNR 会被系统性低估 20~40 dB，导致误报「音量太小」。
+ *
+ * @param {Float64Array} freqs 频率轴
+ * @param {number} sampleRate 采样率
+ * @param {number} fftSize Welch FFT 长度
+ * @param {number} f1 扫频起点
+ * @param {number} f2 扫频终点
+ * @param {number} [capDb] 上限，默认 40 dB
+ * @returns {Float64Array}
+ */
+function sweepProcessingGainDb(freqs, sampleRate, fftSize, f1, f2, capDb = 40) {
+  const span = Math.log(Math.max(f2, f1 * 1.001) / Math.max(f1, 1));
+  const binHz = sampleRate / fftSize;
+  const out = new Float64Array(freqs.length);
+  for (let i = 0; i < freqs.length; i++) {
+    const raw = 10 * Math.log10(Math.max(freqs[i], 1) * span / binHz);
+    out[i] = Number.isFinite(raw) ? Math.min(capDb, Math.max(0, raw)) : 0;
+  }
+  return out;
 }
 
 export class Measurement {
@@ -220,7 +269,7 @@ export class Measurement {
           };
         }
 
-        const peakDb = recordingPeakDb(pcm);
+        const level = recordingLevel(pcm);
         const psd = welchPSD(pcm, sampleRate, 8192, 0.5);
         const reference = welchPSD(signal, sampleRate, 8192, 0.5);
         const responseDb = new Float64Array(psd.db.length);
@@ -239,7 +288,9 @@ export class Measurement {
           psdDb,
           sampleRate,
           mode: 'pink',
-          meta: { frames: pcm.length, peakDb, method: 'welch' },
+          // 粉噪是连续信号，无需处理增益补偿
+          snrGainDb: null,
+          meta: { frames: pcm.length, peakDb: level.peakDb, rmsDb: level.rmsDb, method: 'welch' },
         };
       },
     });
@@ -306,7 +357,8 @@ export class Measurement {
       externalPlayback,
       analyze: (pcm, sampleRate) => {
         const grid = makeGrid();
-        const inputPeakDb = recordingPeakDb(pcm);
+        const level = recordingLevel(pcm);
+        const inputPeakDb = level.peakDb;
         let res = null;
         try {
           res = deconvolveIR(pcm, chirp, sampleRate, { tailMs });
@@ -330,9 +382,10 @@ export class Measurement {
             rawDb,
             smoothDb,
             psdDb: floorCurve(grid.n),
+            snrGainDb: null,
             sampleRate,
             mode: 'sweep',
-            meta: { delayMs: 0, tailMs, peakDb: -100, method: 'deconvolution', degraded: true },
+            meta: { delayMs: 0, tailMs, peakDb: -100, inputPeakDb, method: 'deconvolution', degraded: true },
           };
         }
 
@@ -345,14 +398,24 @@ export class Measurement {
         const smoothDb = smoothLogCurve(grid.freqs, rawDb, 6);
         const delaySamples = Number.isFinite(res.delaySamples) ? res.delaySamples : 0;
         const peakDb = Number.isFinite(res.peakDb) ? res.peakDb : 0;
-        // 麦克风实际接收到的功率谱：与解卷积无关，仅反映「听到了多少能量」
-        const micPsd = welchPSD(pcm, sampleRate, 8192, 0.5);
+
+        // 麦克风功率谱只取「扫频正在播放」的那一段（时延 → 扫频 + 脉冲窗），
+        // 否则采集窗口里的前后静音会把平均功率拉低，让 SNR 进一步虚低。
+        const winStart = Math.min(Math.max(0, delaySamples), Math.max(0, pcm.length - 1));
+        const winLen = Math.max(0, Math.min(chirp.length + Math.ceil(tailMs / 1000 * sampleRate), pcm.length - winStart));
+        const winPcm = pcm.subarray(winStart, winStart + winLen);
+        const micPsd = winLen >= 512
+          ? welchPSD(winPcm, sampleRate, 8192, 0.5)
+          : { freqs: new Float64Array([0]), db: new Float64Array([DB_FLOOR]) };
         const psdDb = normalizeCurve(mapToGrid(micPsd.freqs, micPsd.db, grid.freqs), grid.n, DB_FLOOR);
+
+        const f2 = Math.min(20000, sampleRate * 0.47);
         return {
           freqs: grid.freqs,
           rawDb,
           smoothDb,
           psdDb,
+          snrGainDb: sweepProcessingGainDb(grid.freqs, sampleRate, 8192, 20, f2),
           sampleRate,
           mode: 'sweep',
           meta: {
@@ -360,6 +423,7 @@ export class Measurement {
             tailMs,
             peakDb,
             inputPeakDb,
+            rmsDb: rmsDbOf(winPcm),
             method: 'deconvolution',
           },
         };
@@ -411,6 +475,7 @@ export class Measurement {
 
     const sampleRate = this.engine.sampleRate;
     let noiseDb = null;
+    let noiseRmsDb = null;
     let baseUnits = 0;
 
     // 步骤 1：静音测录本底噪声（不播放任何信号，只做 PSD）
@@ -428,9 +493,11 @@ export class Measurement {
           analyze: (recorded) => recorded,
         });
         noiseDb = this._noisePsdToGrid(pcm, sampleRate);
+        noiseRmsDb = rmsDbOf(pcm);
       } catch (err) {
         if (err && err.name === 'AbortError') throw err;
         noiseDb = null; // 静音测录的任何异常都不影响主流程
+        noiseRmsDb = null;
       }
       baseUnits = 1;
     }
@@ -438,6 +505,7 @@ export class Measurement {
     // 步骤 2：K 次重复采集，收集每次的 rawDb 与麦克风功率谱
     const rawRuns = [];
     const psdRuns = [];
+    let gainArr = null;
     let degradedRuns = 0;
     let firstMeta = null;
 
@@ -450,6 +518,10 @@ export class Measurement {
       const normalizedPsd = normalizeCurve(res && res.psdDb, grid.n, DB_FLOOR);
       rawRuns.push(normalizedRaw);
       psdRuns.push(normalizedPsd);
+
+      if (!gainArr && res && res.snrGainDb && res.snrGainDb.length === grid.n) {
+        gainArr = Float64Array.from(res.snrGainDb);
+      }
 
       if (!res || !res.meta || res.meta.degraded) {
         degradedRuns++;
@@ -465,6 +537,13 @@ export class Measurement {
     const psdMedian = medianAcrossRuns(psdRuns);
     const spreadDb = repeats > 1 ? spreadAcrossRuns(rawRuns) : null;
     const snrArr = noiseDb ? snrDb(psdMedian, noiseDb) : null;
+    // 扫频模式补上匹配滤波的处理增益，否则逐点 SNR 会被低估 20~40 dB
+    if (snrArr && gainArr) {
+      for (let i = 0; i < snrArr.length; i++) {
+        const v = snrArr[i] + gainArr[i];
+        snrArr[i] = v < -20 ? -20 : v > 80 ? 80 : v;
+      }
+    }
     let weight = snrArr ? reliabilityWeight(snrArr, spreadDb, grid.freqs) : null;
     if (allDegraded) weight = new Float64Array(grid.n); // 全部退化时权重全 0
     const smoothDb = smoothLogCurve(grid.freqs, rawDb, 6);
@@ -475,6 +554,27 @@ export class Measurement {
     const inputPeakDb = firstMeta && Number.isFinite(firstMeta.inputPeakDb)
       ? firstMeta.inputPeakDb
       : peakDb;
+    const rmsDb = firstMeta && Number.isFinite(firstMeta.rmsDb) ? firstMeta.rmsDb : null;
+
+    // 宽带信噪比：整段信号功率与本底噪声功率之比，用于判断「到底该调音量还是该降噪」
+    let broadbandSnrDb = null;
+    if (rmsDb !== null && noiseRmsDb !== null && Number.isFinite(rmsDb) && Number.isFinite(noiseRmsDb)) {
+      const ps = Math.pow(10, rmsDb / 10);
+      const pn = Math.pow(10, noiseRmsDb / 10);
+      broadbandSnrDb = pn > 0 && ps > pn ? Math.min(80, 10 * Math.log10((ps - pn) / pn)) : -20;
+    }
+
+    // 扫频处理增益在 200 Hz–5 kHz 的均值，仅用于界面展示
+    let snrGainDb = null;
+    if (gainArr) {
+      let sum = 0;
+      let count = 0;
+      for (let i = 0; i < gainArr.length; i++) {
+        const f = grid.freqs[i];
+        if (f >= 200 && f <= 5000) { sum += gainArr[i]; count++; }
+      }
+      snrGainDb = count ? sum / count : null;
+    }
 
     return {
       freqs: grid.freqs,
@@ -495,6 +595,10 @@ export class Measurement {
         delayMs: firstMeta && Number.isFinite(firstMeta.delayMs) ? firstMeta.delayMs : 0,
         peakDb,
         inputPeakDb,
+        rmsDb,
+        noiseFloorDb: noiseRmsDb,
+        broadbandSnrDb,
+        snrGainDb,
         degraded: allDegraded,
       },
     };

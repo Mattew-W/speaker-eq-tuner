@@ -275,6 +275,20 @@ body{
 .quality-line.is-ok{ border-color:rgba(69,214,160,.45); color:#9fe1cb; }
 .quality-line--poor{ border-color:rgba(236,112,54,.55); color:#f3b295; background:#1d1410; }
 
+/* 测量诊断行：峰值 / 本底 / 宽带 SNR / 扫频处理增益 */
+.stats--diag{
+  flex:none;
+  margin-top:6px;
+  padding:6px 10px;
+  border-radius:8px;
+  border:1px dashed var(--border);
+  background:var(--panel-2);
+  text-align:left;
+  font-size:11.5px;
+  line-height:1.55;
+  color:var(--muted);
+}
+
 /* ---------- 表单控件 ---------- */
 .field{ display:flex; flex-direction:column; gap:6px; min-width:0; }
 .field > label{
